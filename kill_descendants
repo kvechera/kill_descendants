@@ -1,0 +1,129 @@
+#!/bin/sh
+
+
+# params: SIGNAL=TERM KILL_TIMEOUT= WAIT_CONTINUE= $0 pid ...
+# returns: 0 - success, 1 - error, 16 - some non-killed children left
+kill_descendants() {
+	local signal=${SIGNAL:-TERM}
+	local timeleft killing prev_killing top pid
+
+	top=
+	for pid in "$@"; do
+		kill -STOP $pid && top="$top $pid"
+	done
+
+	[ -n "$top" ] || return 1
+
+	build_process_tree() {
+		local status_file field match read_field read_value
+		local STATUS_FIELDS="Tgid Pid PPid"
+
+		for status_file in /proc/[[:digit:]]*/status; do
+			unset $STATUS_FIELDS
+			for field in $STATUS_FIELDS; do
+				match="$field:"
+				while read read_field read_value; do
+					if [ "$match" = "$read_field" ]; then
+						eval $field=\$read_value
+						break
+					fi
+				done
+			done < $status_file
+			[ $Tgid != $Pid ] && break # skip non-main threads
+			eval p_$PPid=\"\$p_$PPid \$Pid\"
+		done
+	}
+
+	kill_children() {
+		local ppid="$1"
+		shift
+
+		local pid children killed_children
+
+		for pid in "$@"; do
+			eval children=\$p_$pid
+
+			if [ -z "$children" ]; then
+				kill -$signal $pid 2>/dev/null
+				killing="$killing $pid"
+				eval k_$ppid=\"\$k_pid \$pid\"
+			else
+				if kill -STOP $pid; then
+					kill_children $pid $children
+					eval killed_children=\$k_$pid
+					if [ "$children" = "$killed_children" ]; then
+						kill -CONT $pid
+					fi
+					unset k_$pid
+				fi
+			fi
+		done
+		unset p_$ppid
+	}
+
+	prev_killing=
+	while true; do
+		killing=
+
+		kill -0 $top || return 0 # return if no top processes left
+
+		build_process_tree
+		kill_children '' $top
+
+		[ -z "$killing" ] && return 0 # return success if nothing was killed during this iteration, i.e. no processes left
+		if [ "$killing" = "$prev_killing" ]; then
+			echo "$killing" >&2
+			return 16  # return EBUSY if the same process are left from the previous iteration
+		fi
+		prev_killing=$killing
+
+		if [ -n "$KILL_TIMEOUT" ]; then
+			timeleft=$((KILL_TIMEOUT*10))	# count time in 1/10th of second
+			while [ $timeleft -gt 0 ] && kill -0 $killing 2>/dev/null; do
+				sleep 0.1
+				: $((timeleft-=1))
+			done
+			kill -9 $killing 2>/dev/null
+		fi
+
+		[ -n "$WAIT_CONTINUE" ] || return 0
+		sleep $WAIT_CONTINUE
+	done
+
+}
+
+
+usage() {
+	echo "\
+Usage: $0 [-s signal] [-t kill_timeout] [-w wait_continue] pid ...
+
+ENV:
+  SIGNAL - signal for kill (default: TERM)
+  KILL_TIMEOUT - kill processes with the KILL signal if they still exist
+  WAIT_CONTINUE - wait and continue killing until no processes left or could be killed
+" >&2
+	exit 1
+}
+
+while getopts s:t:w: opt; do
+	case $opt in
+	s)
+		SIGNAL=$OPTARG
+		SIGNAL=${SIGNAL##*-}
+		;;
+	t)
+		KILL_TIMEOUT=$OPTARG
+		;;
+	w)
+		WAIT_CONTINUE=$OPTARG
+		;;
+	\?)
+		usage
+		;;
+	esac
+done
+shift $((OPTIND-1))
+
+[ $# -gt 0 ] || usage
+
+kill_descendants "$@"

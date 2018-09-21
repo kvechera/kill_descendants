@@ -1,0 +1,2 @@
+
+Keep the list of the processes that have all children killed in order to send them the main killing signal during the next iteration even if they have created new children.
