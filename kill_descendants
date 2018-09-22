@@ -49,12 +49,17 @@ kill_descendants() {
 				eval k_$ppid=\"\$k_pid \$pid\"
 			else
 				if kill -STOP $pid; then
+					# check if we've already killed its children before
+					# and kill it if the process got new children
+					eval killed_children=\$k_$pid
+					[ -n "$killed_children" ] && kill -TERM $pid
+					unset k_$pid
+
 					kill_children $pid $children
 					eval killed_children=\$k_$pid
 					if [ "$children" = "$killed_children" ]; then
 						kill -CONT $pid
 					fi
-					unset k_$pid
 				fi
 			fi
 		done
